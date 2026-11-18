@@ -1,0 +1,1 @@
+print("Sirlar olami avtomatik tizimi ishga tushdi!")
