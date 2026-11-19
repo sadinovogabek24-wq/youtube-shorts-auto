@@ -2,78 +2,107 @@
 import os
 import asyncio
 import textwrap
+from PIL import Image, ImageDraw, ImageFont
 from google import genai
 import edge_tts
-from PIL import Image, ImageDraw, ImageFont
 from moviepy.editor import ImageClip, AudioFileClip
 
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+API_KEY = os.environ.get("GEMINI_API_KEY")
 
-def create_video(title, script):
-    image = Image.new("RGB", (1080, 1920), (12, 20, 45))
-    draw = ImageDraw.Draw(image)
+if not API_KEY:
+    raise ValueError("GEMINI_API_KEY topilmadi!")
 
-    try:
-        font = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 65)
-        small = ImageFont.truetype(
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 48)
-    except:
-        font = ImageFont.load_default()
-        small = font
+client = genai.Client(api_key=API_KEY)
 
-    draw.text((70, 300), "SIRLAR OLAMI", font=font, fill="yellow")
-    y = 650
-    for line in textwrap.wrap(title, width=22):
-        draw.text((70, y), line, font=font, fill="white")
-        y += 100
+VOICE = "uz-UZ-SardorNeural"
+MODEL = "gemini-3.8-flash"
 
-    y += 100
-    for line in textwrap.wrap(script, width=32):
-        draw.text((70, y), line, font=small, fill="white")
-        y += 75
-        if y > 1600:
-            break
+def create_script():
+    prompt = """
+    O'zbek tilida qiziqarli YouTube Shorts uchun
+    40-50 soniyalik matn yoz.
+    Mavzu: Sirli va hayratlanarli fakt.
+    Boshlanishi odamni qiziqtirsin.
+    Oxirida tomoshabinga savol ber.
+    Faqat o'zbekcha matn yoz.
+    Sarlavha va izohlarni qo'shma.
+    """
+    response = client.models.generate_content(
+        model=MODEL,
+        contents=prompt
+    )
+    if not response.text:
+        raise ValueError("Gemini matn yaratmadi!")
+    return response.text.strip()
 
-    image.save("background.png")
+def create_image(title):
+    width, height = 1080, 1920
+    img = Image.new("RGB", (width, height), (15, 20, 45))
+    draw = ImageDraw.Draw(img)
 
-    async def make_audio():
-        voice = edge_tts.Communicate(
-            script, "uz-UZ-SardorNeural")
-        await voice.save("voice.mp3")
+    for y in range(height):
+        color = (
+            15,
+            20 + int(y / height * 20),
+            45 + int(y / height * 35)
+        )
+        draw.line((0, y, width, y), fill=color)
 
-    asyncio.run(make_audio())
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+    font = ImageFont.truetype(font_path, 68)
 
+    lines = textwrap.wrap(title, width=20)
+    text = "\n".join(lines[:5])
+
+    draw.multiline_text(
+        (70, 650),
+        text,
+        font=font,
+        fill="white",
+        spacing=35,
+        align="center"
+    )
+
+    img.save("background.png")
+
+async def create_voice(script):
+    communicate = edge_tts.Communicate(
+        script,
+        VOICE
+    )
+    await communicate.save("voice.mp3")
+
+def create_video():
     audio = AudioFileClip("voice.mp3")
-    video = ImageClip("background.png").set_duration(audio.duration)
-    video = video.set_audio(audio)
+    duration = min(audio.duration, 58)
 
-    video.write_videofile(
+    image = ImageClip("background.png").set_duration(duration)
+    image = image.set_audio(audio.subclip(0, duration))
+
+    image.write_videofile(
         "shorts.mp4",
         fps=24,
         codec="libx264",
         audio_codec="aac"
     )
 
+    audio.close()
+    image.close()
+
 def main():
-    prompt = """
-    O'zbek tilida juda qiziqarli, hayratlanarli va
-    tekshirish mumkin bo'lgan bitta fakt yoz.
-    Javobni quyidagi shaklda ber:
-    SARLAVHA: ...
-    MATN: ...
-    Matn 80-100 so'z bo'lsin.
-    """
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt
-    )
+    print("Matn yaratilmoqda...")
+    script = create_script()
 
-    result = response.text
-    title = result.split("SARLAVHA:")[1].split("MATN:")[0].strip()
-    script = result.split("MATN:")[1].strip()
+    print("Ovoz tayyorlanmoqda...")
+    asyncio.run(create_voice(script))
 
-    create_video(title, script)
+    print("Rasm tayyorlanmoqda...")
+    create_image("SIRLI FAKTLAR")
+
+    print("Video tayyorlanmoqda...")
+    create_video()
+
+    print("VIDEO TAYYOR: shorts.mp4")
 
 if __name__ == "__main__":
     main()
