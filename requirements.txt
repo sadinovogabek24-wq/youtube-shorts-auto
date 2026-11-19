@@ -1,0 +1,5 @@
+google-genai
+requests
+edge-tts
+Pillow
+moviepy==1.0.3
