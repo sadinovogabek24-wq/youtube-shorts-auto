@@ -1,9 +1,8 @@
 
 import os
-import re
+import time
 import asyncio
 import textwrap
-import time
 import numpy as np
 
 from PIL import Image, ImageDraw, ImageFont
@@ -22,15 +21,19 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 
 
-# SOZLAMALAR
+# ==============================
+# 1. SOZLAMALAR
+# ==============================
+
 API_KEY = os.environ.get("GEMINI_API_KEY")
 
-MODEL = "gemini-3.8-flash"
-BACKUP_MODEL = "gemini-3.5-flash-lite"
+MODEL = "gemini-3.5-flash-lite"
+BACKUP_MODEL = "gemini-3.8-flash"
 
 VOICE = "uz-UZ-SardorNeural"
 
-W, H = 1080, 1920
+W = 1080
+H = 1920
 FPS = 24
 
 if not API_KEY:
@@ -39,18 +42,29 @@ if not API_KEY:
 client = genai.Client(api_key=API_KEY)
 
 
-# 1. HIKOYA YARATISH
+# ==============================
+# 2. HIKOYA YARATISH
+# ==============================
+
 def create_script():
 
     prompt = """
-    O'zbek tilida juda qiziqarli sirli hikoya yoz.
-    Mavzu: Sirlar, tarix, koinot yoki hayratlanarli faktlar.
-    220-280 ta so'z bo'lsin.
-    Ovozda o'qilganda 90-150 soniya davom etsin.
-    Birinchi jumla juda qiziqarli bo'lsin.
-    Sodda va ravon o'zbek tilida yoz.
-    Oxirida tomoshabinga savol ber.
-    Faqat hikoyaning o'zini yoz.
+    O'zbek tilida juda qiziqarli va sirli hikoya yoz.
+
+    Mavzular:
+    - Sirli voqealar
+    - Tarixiy jumboqlar
+    - Koinot sirlari
+    - Hayratlanarli faktlar
+    - Noma'lum hodisalar
+
+    Talablar:
+    1. 180-220 ta so'z yoz.
+    2. Birinchi jumla tomoshabinni darhol qiziqtirsin.
+    3. Hikoya ravon va sodda o'zbek tilida bo'lsin.
+    4. Zerikarli gaplar ishlatma.
+    5. Oxirida tomoshabinga qiziqarli savol ber.
+    6. Faqat hikoyani yoz.
     """
 
     last_error = None
@@ -59,7 +73,7 @@ def create_script():
 
         print("Gemini modeli:", model, flush=True)
 
-        for attempt in range(3):
+        for attempt in range(2):
 
             try:
 
@@ -69,9 +83,16 @@ def create_script():
                 )
 
                 if not response.text:
-                    raise ValueError("Hikoya yaratilmadi!")
+                    raise ValueError("Gemini bo'sh javob qaytardi!")
 
-                return response.text.strip()
+                script = response.text.strip()
+
+                if len(script.split()) < 100:
+                    raise ValueError("Hikoya juda qisqa!")
+
+                print("Hikoya tayyor!", flush=True)
+
+                return script
 
             except Exception as error:
 
@@ -79,36 +100,45 @@ def create_script():
 
                 print("Gemini xatosi:", error, flush=True)
 
-                if any(code in str(error) for code in [
-                    "429", "500", "502", "503", "504"
-                ]):
+                if attempt == 0 and any(
+                    code in str(error)
+                    for code in ["429", "500", "502", "503", "504"]
+                ):
 
-                    wait = 10 * (attempt + 1)
-
-                    print(wait, "soniya kutamiz", flush=True)
-                    time.sleep(wait)
+                    print("10 soniya kutamiz...", flush=True)
+                    time.sleep(10)
 
                 else:
-                    raise
+                    break
 
-    raise RuntimeError(str(last_error))
+    raise RuntimeError(
+        "Gemini hikoya yarata olmadi: " + str(last_error)
+    )
 
 
-# 2. OVOZ YARATISH
+# ==============================
+# 3. OVOZ YARATISH
+# ==============================
+
 async def create_voice(script):
 
-    speech = edge_tts.Communicate(
+    print("Ovoz yaratilmoqda...", flush=True)
+
+    communicate = edge_tts.Communicate(
         script,
         VOICE
     )
 
-    await speech.save("voice.mp3")
+    await communicate.save("voice.mp3")
 
     print("Ovoz tayyor!", flush=True)
 
 
-# 3. OVOZ DAVOMIYLIGINI TEKSHIRISH
-def check_audio():
+# ==============================
+# 4. OVOZ DAVOMIYLIGI
+# ==============================
+
+def get_audio_duration():
 
     audio = AudioFileClip("voice.mp3")
 
@@ -124,36 +154,42 @@ def check_audio():
         flush=True
     )
 
-    if duration < 90 or duration > 150:
-        return False
-
-    return True
+    return duration
 
 
-# 4. VIDEO FONI
+# ==============================
+# 5. VIDEO FONI
+# ==============================
+
 def create_background():
+
+    print("Video foni yaratilmoqda...", flush=True)
 
     img = Image.new("RGB", (W, H))
     draw = ImageDraw.Draw(img)
 
     for y in range(H):
 
-        c = int(20 + 35 * y / H)
+        ratio = y / H
+
+        r = int(5 + ratio * 10)
+        g = int(8 + ratio * 12)
+        b = int(25 + ratio * 45)
 
         draw.line(
             (0, y, W, y),
-            fill=(8, 12, c)
+            fill=(r, g, b)
         )
 
     draw.ellipse(
-        (100, 250, 950, 1100),
-        outline=(45, 65, 110),
+        (100, 250, 980, 1130),
+        outline=(45, 65, 120),
         width=12
     )
 
     draw.ellipse(
-        (250, 450, 850, 1050),
-        outline=(65, 45, 110),
+        (240, 420, 840, 1020),
+        outline=(65, 45, 120),
         width=8
     )
 
@@ -162,7 +198,10 @@ def create_background():
     print("Fon tayyor!", flush=True)
 
 
-# 5. SUBTITRLAR
+# ==============================
+# 6. SUBTITRLAR
+# ==============================
+
 def make_subtitles(script, duration):
 
     font_path = (
@@ -176,9 +215,6 @@ def make_subtitles(script, duration):
     )
 
     words = script.split()
-
-    if not words:
-        raise ValueError("Hikoya bo'sh!")
 
     groups = [
         words[i:i + 7]
@@ -222,9 +258,11 @@ def make_subtitles(script, duration):
             stroke_width=2
         )
 
-        x = (W - (bbox[2] - bbox[0])) // 2
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
 
-        y = (300 - (bbox[3] - bbox[1])) // 2
+        x = (W - text_width) // 2
+        y = (300 - text_height) // 2
 
         draw.multiline_text(
             (x, y),
@@ -238,7 +276,10 @@ def make_subtitles(script, duration):
         )
 
         clip = (
-            ImageClip(np.array(img))
+            ImageClip(
+                np.array(img),
+                transparent=True
+            )
             .set_start(start)
             .set_duration(end - start)
             .set_position(("center", 1250))
@@ -249,8 +290,13 @@ def make_subtitles(script, duration):
     return clips
 
 
-# 6. VIDEO YARATISH
+# ==============================
+# 7. VIDEO YARATISH
+# ==============================
+
 def create_video(script):
+
+    print("Video tayyorlanmoqda...", flush=True)
 
     audio = AudioFileClip("voice.mp3")
 
@@ -296,7 +342,11 @@ def create_video(script):
             audio_codec="aac",
             preset="ultrafast",
             threads=2,
-            ffmpeg_params=["-crf", "28"],
+            ffmpeg_params=[
+                "-crf", "28",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart"
+            ],
             audio_bitrate="128k"
         )
 
@@ -316,7 +366,10 @@ def create_video(script):
         audio.close()
 
 
-# 7. YOUTUBE'GA YUKLASH
+# ==============================
+# 8. YOUTUBE'GA YUKLASH
+# ==============================
+
 def upload_to_youtube():
 
     print("YouTube'ga ulanish...", flush=True)
@@ -432,27 +485,31 @@ def upload_to_youtube():
 
     video_id = result["id"]
 
-    print("VIDEO MUVAFFAQIYATLI YUKLANDI!", flush=True)
-
     print(
-        "Video ID:",
-        video_id,
+        "VIDEO MUVAFFAQIYATLI YUKLANDI!",
         flush=True
     )
 
     print(
-        "Video havolasi: https://www.youtube.com/watch?v="
-        + video_id,
+        "VIDEO HAVOLASI:",
+        "https://www.youtube.com/watch?v=" + video_id,
         flush=True
     )
 
 
-# 8. ASOSIY ISH JARAYONI
+# ==============================
+# 9. ASOSIY DASTUR
+# ==============================
+
 def main():
 
-    print("SHORTS AUTOMATION ISHGA TUSHDI!", flush=True)
+    print(
+        "SHORTS AUTOMATION ISHGA TUSHDI!",
+        flush=True
+    )
 
     script = None
+    audio_ready = False
 
     for attempt in range(3):
 
@@ -463,11 +520,13 @@ def main():
 
         script = create_script()
 
-        print("Ovoz tayyorlanmoqda...", flush=True)
-
         asyncio.run(create_voice(script))
 
-        if check_audio():
+        duration = get_audio_duration()
+
+        if 90 <= duration <= 150:
+
+            audio_ready = True
             break
 
         print(
@@ -476,27 +535,35 @@ def main():
             flush=True
         )
 
-    else:
+    if not audio_ready:
 
         raise RuntimeError(
-            "3 urinishda ham 90-150 soniyalik ovoz olinmadi."
+            "3 urinishda ham mos davomiylikdagi "
+            "ovoz yaratilmadi."
         )
 
-    print("Fon yaratilmoqda...", flush=True)
-
     create_background()
-
-    print("Video tayyorlanmoqda...", flush=True)
 
     create_video(script)
 
     if not os.path.exists("shorts.mp4"):
-        raise FileNotFoundError("shorts.mp4 topilmadi!")
+
+        raise FileNotFoundError(
+            "shorts.mp4 topilmadi!"
+        )
 
     if os.path.getsize("shorts.mp4") == 0:
-        raise ValueError("Video fayli bo'sh!")
 
-    print("YouTube'ga yuklanmoqda...", flush=True)
+        raise ValueError(
+            "Video fayli bo'sh!"
+        )
+
+    print(
+        "Video hajmi:",
+        round(os.path.getsize("shorts.mp4") / 1024 / 1024, 2),
+        "MB",
+        flush=True
+    )
 
     upload_to_youtube()
 
@@ -507,5 +574,4 @@ def main():
 
 
 if __name__ == "__main__":
-
     main()
