@@ -3,7 +3,9 @@ import os
 import re
 import asyncio
 import textwrap
+import time
 import numpy as np
+
 from PIL import Image, ImageDraw, ImageFont
 from google import genai
 import edge_tts
@@ -22,7 +24,10 @@ from google.auth.transport.requests import Request
 
 # SOZLAMALAR
 API_KEY = os.environ.get("GEMINI_API_KEY")
+
 MODEL = "gemini-3.8-flash"
+BACKUP_MODEL = "gemini-3.5-flash-lite"
+
 VOICE = "uz-UZ-SardorNeural"
 
 W, H = 1080, 1920
@@ -35,6 +40,7 @@ client = genai.Client(api_key=API_KEY)
 
 # 1. HIKOYA YARATISH
 def create_script():
+
     prompt = """
     O'zbek tilida juda qiziqarli sirli hikoya yoz.
     Mavzu: Sirlar, tarix, koinot yoki hayratlanarli faktlar.
@@ -46,19 +52,57 @@ def create_script():
     Faqat hikoyaning o'zini yoz.
     """
 
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt
+    last_error = None
+
+    for model in [MODEL, BACKUP_MODEL]:
+
+        print("Model ishlatilmoqda:", model)
+
+        for attempt in range(3):
+
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=prompt
+                )
+
+                if not response.text:
+                    raise ValueError("Gemini matn yaratmadi!")
+
+                return response.text.strip()
+
+            except Exception as error:
+
+                last_error = error
+                message = str(error)
+
+                if any(code in message for code in [
+                    "503", "429", "500", "502", "504"
+                ]):
+
+                    wait = 10 * (attempt + 1)
+
+                    print(
+                        "Gemini band. ",
+                        wait,
+                        "soniya kutamiz..."
+                    )
+
+                    time.sleep(wait)
+
+                else:
+                    raise
+
+        print("Keyingi modelga o'tilmoqda...")
+
+    raise RuntimeError(
+        "Ikkala model ham ishlamadi: " + str(last_error)
     )
-
-    if not response.text:
-        raise ValueError("Gemini matn yaratmadi!")
-
-    return response.text.strip()
 
 
 # 2. O'ZBEKCHA OVOZ
 async def create_voice(script):
+
     speech = edge_tts.Communicate(
         script,
         VOICE
@@ -69,11 +113,14 @@ async def create_voice(script):
 
 # 3. VIDEO FONI
 def create_background():
+
     img = Image.new("RGB", (W, H))
     draw = ImageDraw.Draw(img)
 
     for y in range(H):
+
         c = int(20 + 35 * y / H)
+
         draw.line(
             (0, y, W, y),
             fill=(8, 12, c)
@@ -96,6 +143,7 @@ def create_background():
 
 # 4. SUBTITRLAR
 def make_subtitles(script, duration):
+
     font_path = (
         "/usr/share/fonts/truetype/dejavu/"
         "DejaVuSans-Bold.ttf"
@@ -118,8 +166,11 @@ def make_subtitles(script, duration):
     current = 0
 
     for group in groups:
+
         start = duration * current / total_words
+
         current += len(group)
+
         end = duration * current / total_words
 
         img = Image.new(
@@ -147,6 +198,7 @@ def make_subtitles(script, duration):
         )
 
         x = (W - (bbox[2] - bbox[0])) // 2
+
         y = (300 - (bbox[3] - bbox[1])) // 2
 
         draw.multiline_text(
@@ -174,12 +226,15 @@ def make_subtitles(script, duration):
 
 # 5. VIDEO YARATISH
 def create_video(script):
+
     audio = AudioFileClip("voice.mp3")
 
     try:
+
         duration = audio.duration
 
         if duration < 90 or duration > 150:
+
             raise ValueError(
                 f"Ovoz {duration:.1f} soniya. "
                 "90-150 soniya oralig'ida bo'lishi kerak."
@@ -213,6 +268,7 @@ def create_video(script):
         )
 
         try:
+
             video.write_videofile(
                 "shorts.mp4",
                 fps=24,
@@ -221,6 +277,7 @@ def create_video(script):
                 preset="ultrafast",
                 threads=2
             )
+
         finally:
             video.close()
 
@@ -230,6 +287,7 @@ def create_video(script):
 
 # 6. YOUTUBE'GA YUKLASH
 def upload_to_youtube():
+
     print("YouTube'ga ulanish...")
 
     required = [
@@ -239,23 +297,30 @@ def upload_to_youtube():
     ]
 
     for name in required:
+
         if not os.environ.get(name):
+
             raise ValueError(
                 name + " GitHub Secrets'da topilmadi!"
             )
 
     credentials = Credentials(
         token=None,
+
         refresh_token=os.environ[
             "YOUTUBE_REFRESH_TOKEN"
         ],
+
         token_uri="https://oauth2.googleapis.com/token",
+
         client_id=os.environ[
             "YOUTUBE_CLIENT_ID"
         ],
+
         client_secret=os.environ[
             "YOUTUBE_CLIENT_SECRET"
         ],
+
         scopes=[
             "https://www.googleapis.com/auth/youtube.upload"
         ]
@@ -272,26 +337,34 @@ def upload_to_youtube():
 
     request = youtube.videos().insert(
         part="snippet,status",
+
         body={
+
             "snippet": {
+
                 "title": "Sirli hikoya | Sirlar Olami",
+
                 "description": (
                     "Qiziqarli sirli hikoyalar va "
                     "hayratlanarli faktlar.\n"
                     "Kanalga obuna bo'ling!"
                 ),
+
                 "tags": [
                     "sirlar",
                     "sirli hikoyalar",
                     "uzbek",
                     "shorts"
                 ],
+
                 "categoryId": "27"
             },
+
             "status": {
                 "privacyStatus": "unlisted"
             }
         },
+
         media_body=MediaFileUpload(
             "shorts.mp4",
             mimetype="video/mp4",
@@ -314,19 +387,25 @@ def upload_to_youtube():
 
 # 7. ASOSIY ISH JARAYONI
 def main():
+
     print("1. Hikoya yaratilmoqda...")
+
     script = create_script()
 
     print("2. Ovoz tayyorlanmoqda...")
+
     asyncio.run(create_voice(script))
 
     print("3. Fon yaratilmoqda...")
+
     create_background()
 
     print("4. Video tayyorlanmoqda...")
+
     create_video(script)
 
     print("5. YouTube'ga yuklanmoqda...")
+
     upload_to_youtube()
 
     print("BARCHA ISHLAR TUGADI!")
