@@ -44,7 +44,7 @@ def create_script():
     prompt = """
     O'zbek tilida juda qiziqarli sirli hikoya yoz.
     Mavzu: Sirlar, tarix, koinot yoki hayratlanarli faktlar.
-    250-330 ta so'z bo'lsin.
+    420-480 ta so'z bo'lsin.
     Ovozda o'qilganda 90-150 soniya davom etsin.
     Dastlabki jumla tomoshabinni darhol qiziqtirsin.
     Sodda va ravon o'zbek tilida yoz.
