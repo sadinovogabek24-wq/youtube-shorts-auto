@@ -1,79 +1,90 @@
+
 import os
-import json
 import re
+import json
 import math
 import random
 import asyncio
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 import edge_tts
 
 from google import genai
 from moviepy.editor import AudioFileClip, VideoClip
 
-# SETTINGS
-W, H = 1080, 1920
+
+# =====================================
+# SOZLAMALAR
+# =====================================
+
+W = 1080
+H = 1920
 FPS = 24
+
 VOICE = "uz-UZ-SardorNeural"
-MIN_SECONDS = 90
-MAX_SECONDS = 150
 OUTPUT = "shorts.mp4"
 
+MIN_WORDS = 100
+MAX_WORDS = 380
+MAX_SECONDS = 180
 
-# IKKI QISMLI HIKOYA YARATISH
+
+# =====================================
+# HIKOYA YARATISH
+# =====================================
+
 def create_episode():
 
     api_key = os.getenv("GEMINI_API_KEY")
+
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY topilmadi")
 
     client = genai.Client(api_key=api_key)
 
     prompt = """
-Sen professional sirli serial ssenariynavissisan.
+Sen professional o'zbek serial ssenariynavissisan.
 
-YO'QOLGANLAR SIRI nomli davomli serial yarat.
+YO'QOLGANLAR SIRI nomli sirli serial yarat.
 
-ASOSIY QAHRAMON:
+BOSH QAHRAMON:
 15 yoshli Jasur.
 
 VOQEA:
-Bizning shaharda har kuni bir odam izsiz yo'qoladi.
-Hech kim buning sababini bilmaydi.
-Jasur bu voqealar orasida sirli bog'liqlik borligini sezadi.
+Kichik shaharchada odamlar sirli ravishda yo'qolmoqda.
+Jasur bu voqealarning sababini aniqlashga kirishadi.
 
 1-QISM:
-Jasur yo'qolgan odamlar haqida izlanadi.
-U sirli belgilar, qora mashina va eski uyga duch keladi.
-Lekin aybdorni topmaydi.
-Oxirida juda dahshatli sirli voqea yuz beradi.
+- Jasur izlanishni boshlaydi.
+- Qora mashina va eski uyga duch keladi.
+- Sirli belgilarni topadi.
+- Oxirida kuchli hayajonli voqea yuz beradi.
+- Sirning javobi ochilmasin.
 
 2-QISM:
-Hikoya birinchi qism tugagan joydan davom etadi.
-Jasur izlanishni davom ettiradi.
-U yo'qolgan odamlar qayerga ketganini,
-buning sababini va ortida kim turganini topadi.
-Hikoya oxirida barcha asosiy sirlar ochiladi.
+- Birinchi qism tugagan joydan davom etsin.
+- Jasur izlanishni davom ettirsin.
+- Yo'qolgan odamlarning taqdiri aniqlansin.
+- Barcha asosiy sirlar ochilsin.
+- Hikoya yakunlansin.
 
-QOIDALAR:
-- Ikkala qism bitta hikoya bo'lsin.
-- Jasurning ko'rinishi va xarakteri bir xil qolsin.
-- Hikoya hayajonli va sirli bo'lsin.
-- Birinchi qismda sir ochilmasin.
-- Ikkinchi qismda sir to'liq ochilsin.
-- Har bir qism 300-380 so'z bo'lsin.
+MUHIM QOIDALAR:
+- Har bir qism 100 dan 380 tagacha so'z bo'lsin.
+- Ikki qism bir-biriga uzviy bog'lansin.
+- Jasurning xarakteri o'zgarmasin.
 - O'zbek tilida yoz.
 - Erkak ovozida o'qishga mos bo'lsin.
-- Har bir qism 90-150 soniyaga mos bo'lsin.
+- Hikoya qiziqarli va hayajonli bo'lsin.
+- Hikoya to'liq badiiy to'qima bo'lsin.
 
-Faqat JSON qaytar:
+Faqat quyidagi JSON formatda javob ber:
 
 {
-"title": "Yo'qolganlar siri",
-"part1": "Birinchi qism",
-"part2": "Ikkinchi qism"
+  "title": "Yo'qolganlar siri",
+  "part1": "Birinchi qism matni",
+  "part2": "Ikkinchi qism matni"
 }
 """
 
@@ -83,6 +94,7 @@ Faqat JSON qaytar:
     )
 
     raw = (response.text or "").strip()
+
     raw = re.sub(
         r"^```(?:json)?\s*|\s*```$",
         "",
@@ -93,24 +105,40 @@ Faqat JSON qaytar:
     match = re.search(r"\{.*\}", raw, flags=re.S)
 
     if not match:
-        raise ValueError("Hikoya JSON shaklida kelmadi")
+        raise ValueError("Gemini JSON qaytarmadi")
 
     episode = json.loads(match.group(0))
 
     for key in ("part1", "part2"):
-        if not episode.get(key):
-            raise ValueError(f"{key} topilmadi")
+
+        story = episode.get(key, "").strip()
+
+        if not story:
+            raise ValueError(f"{key} bo'sh")
+
+        word_count = len(story.split())
+
+        print(f"{key}: {word_count} ta so'z")
+
+        if not MIN_WORDS <= word_count <= MAX_WORDS:
+            raise ValueError(
+                f"{key} so'z soni noto'g'ri: {word_count}. "
+                "100-380 ta so'z bo'lishi kerak."
+            )
 
     return episode
 
 
-# ERKAK OVOZI
+# =====================================
+# O'ZBEKCHA ERKAK OVOZI
+# =====================================
+
 async def make_voice(text):
 
     communicate = edge_tts.Communicate(
         text=text,
         voice=VOICE,
-        rate="-8%",
+        rate="-5%",
         volume="+0%"
     )
 
@@ -118,21 +146,28 @@ async def make_voice(text):
 
 
 def create_voice(text):
+
     asyncio.run(make_voice(text))
 
 
-# KADR RANGLARI
+# =====================================
+# SAHNA RANGLARI
+# =====================================
+
 PALETTES = [
     ((8, 15, 38), (34, 75, 115), (235, 160, 75)),
     ((28, 12, 48), (92, 42, 105), (255, 190, 95)),
     ((5, 34, 48), (20, 105, 110), (245, 205, 115)),
     ((35, 17, 18), (125, 55, 45), (255, 180, 95)),
     ((10, 20, 45), (48, 65, 125), (180, 210, 255)),
-    ((25, 20, 12), (105, 82, 48), (255, 215, 125)),
+    ((25, 20, 12), (105, 82, 48), (255, 215, 125))
 ]
 
 
-# HARAKATLI SAHNA YARATISH
+# =====================================
+# RASM SAHNASI
+# =====================================
+
 def make_scene(seed, index):
 
     rng = random.Random(seed + index * 7919)
@@ -144,35 +179,32 @@ def make_scene(seed, index):
     grad = np.zeros((H, W, 3), dtype=np.uint8)
 
     for channel in range(3):
+
         values = np.linspace(
             top[channel],
             bottom[channel],
             H,
             dtype=np.uint8
         )
+
         grad[:, :, channel] = values[:, None]
 
-    img = Image.fromarray(grad, mode="RGB")
+    img = Image.fromarray(grad, mode="RGB").convert("RGBA")
 
-    glow_layer = Image.new(
-        "RGBA",
-        (W, H),
-        (0, 0, 0, 0)
-    )
+    draw = ImageDraw.Draw(img, "RGBA")
 
-    gd = ImageDraw.Draw(glow_layer)
-
+    # Yorug'lik
     gx = rng.randint(250, 830)
     gy = rng.randint(330, 780)
 
-    for radius in range(420, 20, -20):
+    for radius in range(400, 20, -20):
 
         alpha = max(
             2,
-            int(2 + (420 - radius) * 0.055)
+            int((400 - radius) * 0.12)
         )
 
-        gd.ellipse(
+        draw.ellipse(
             (
                 gx-radius,
                 gy-radius,
@@ -182,31 +214,26 @@ def make_scene(seed, index):
             fill=(*glow, alpha)
         )
 
-    img = Image.alpha_composite(
-        img.convert("RGBA"),
-        glow_layer
-    )
-
-    draw = ImageDraw.Draw(img, "RGBA")
-
+    # Yulduzlar
     for _ in range(150):
 
         x = rng.randint(0, W)
-        y = rng.randint(0, int(H * 0.72))
-        r = rng.choice([2, 3, 4])
+        y = rng.randint(0, 1200)
+        r = rng.randint(1, 4)
 
         draw.ellipse(
             (x-r, y-r, x+r, y+r),
-            fill=(255, 245, 220, 150)
+            fill=(255, 245, 220, 170)
         )
 
-    r = rng.randint(95, 155)
-    mx = rng.randint(220, 850)
-    my = rng.randint(420, 820)
+    # Oy
+    r = rng.randint(80, 130)
+    mx = rng.randint(250, 850)
+    my = rng.randint(350, 750)
 
     draw.ellipse(
         (mx-r, my-r, mx+r, my+r),
-        fill=(*glow, 235)
+        fill=(*glow, 220)
     )
 
     # Tog'lar
@@ -219,17 +246,23 @@ def make_scene(seed, index):
 
         while x <= W:
 
-            y = base_y + rng.randint(-170, 150)
+            y = base_y + rng.randint(-150, 150)
+
             points.append((x, y))
             x += rng.randint(90, 180)
 
-        points.extend([(W, H)])
+        points.append((W, H))
 
         shade = max(0, 35 - layer * 8)
 
         draw.polygon(
             points,
-            fill=(shade + 5, shade + 18, shade + 35, 255)
+            fill=(
+                shade + 5,
+                shade + 18,
+                shade + 35,
+                255
+            )
         )
 
     # Qorong'i binolar
@@ -262,7 +295,12 @@ def make_scene(seed, index):
             )
 
     return img.convert("RGB")
-    # HIKOYA UCHUN SAHNA MATNLARINI AJRATISH
+
+
+# =====================================
+# MATNNI SAHNALARGA BO'LISH
+# =====================================
+
 def split_into_scenes(text, count=8):
 
     sentences = re.split(
@@ -270,42 +308,61 @@ def split_into_scenes(text, count=8):
         text.strip()
     )
 
-    sentences = [s.strip() for s in sentences if s.strip()]
+    sentences = [
+        s.strip()
+        for s in sentences
+        if s.strip()
+    ]
 
     if not sentences:
         return [text]
 
+    chunk_size = max(
+        1,
+        math.ceil(len(sentences) / count)
+    )
+
     scenes = []
-    chunk_size = max(1, math.ceil(len(sentences) / count))
 
     for i in range(0, len(sentences), chunk_size):
-        scenes.append(" ".join(sentences[i:i + chunk_size]))
+
+        scenes.append(
+            " ".join(sentences[i:i + chunk_size])
+        )
 
     return scenes
 
 
-# SUBTITR UCHUN SHRIFT
+# =====================================
+# SHRIFT
+# =====================================
+
 def get_font(size):
 
-    font_paths = [
+    paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
     ]
 
-    for path in font_paths:
+    for path in paths:
+
         if os.path.exists(path):
             return ImageFont.truetype(path, size)
 
     return ImageFont.load_default()
 
 
-# SUBTITRNI RASMGA YOZISH
+# =====================================
+# SUBTITR
+# =====================================
+
 def add_subtitle(img, text):
 
     draw = ImageDraw.Draw(img)
-    font = get_font(48)
+    font = get_font(46)
 
     words = text.split()
+
     lines = []
     current = ""
 
@@ -313,11 +370,20 @@ def add_subtitle(img, text):
 
         test = (current + " " + word).strip()
 
-        if draw.textbbox((0, 0), test, font=font)[2] < 930:
+        bbox = draw.textbbox(
+            (0, 0),
+            test,
+            font=font
+        )
+
+        if bbox[2] < 930:
             current = test
+
         else:
+
             if current:
                 lines.append(current)
+
             current = word
 
     if current:
@@ -329,12 +395,17 @@ def add_subtitle(img, text):
 
     for line in lines:
 
-        bbox = draw.textbbox((0, 0), line, font=font)
+        bbox = draw.textbbox(
+            (0, 0),
+            line,
+            font=font
+        )
+
         width = bbox[2] - bbox[0]
         x = (W - width) // 2
 
         draw.text(
-            (x + 3, y + 3),
+            (x+3, y+3),
             line,
             font=font,
             fill=(0, 0, 0)
@@ -352,7 +423,10 @@ def add_subtitle(img, text):
     return img
 
 
-# HARAKATLI VIDEO KADRINI YARATISH
+# =====================================
+# HARAKATLI KADR
+# =====================================
+
 def make_frame(t, duration, scenes, scene_texts):
 
     scene_duration = duration / len(scenes)
@@ -368,20 +442,30 @@ def make_frame(t, duration, scenes, scene_texts):
 
     img = scenes[index].copy()
 
-    # Sekin yaqinlashish va kamera harakati
+    # Kamera yaqinlashishi
     zoom = 1.0 + 0.10 * local_t
 
     new_w = int(W / zoom)
     new_h = int(H / zoom)
 
-    left = int((W - new_w) * local_t * 0.35)
-    top = int((H - new_h) * local_t * 0.35)
+    left = int(
+        (W - new_w) * local_t * 0.35
+    )
 
-    left = max(0, min(left, W - new_w))
-    top = max(0, min(top, H - new_h))
+    top = int(
+        (H - new_h) * local_t * 0.35
+    )
+
+    left = max(0, min(left, W-new_w))
+    top = max(0, min(top, H-new_h))
 
     img = img.crop(
-        (left, top, left + new_w, top + new_h)
+        (
+            left,
+            top,
+            left + new_w,
+            top + new_h
+        )
     )
 
     img = img.resize(
@@ -397,64 +481,89 @@ def make_frame(t, duration, scenes, scene_texts):
     return np.array(img)
 
 
+# =====================================
 # VIDEO YARATISH
+# =====================================
+
 def create_video(story, part):
 
     print("Ovoz tayyorlanmoqda...")
+
     create_voice(story)
 
     audio = AudioFileClip("voice.mp3")
-    duration = audio.duration
 
-    print(f"Ovoz davomiyligi: {duration:.1f} soniya")
+    try:
 
-    if duration < MIN_SECONDS or duration > MAX_SECONDS:
+        duration = audio.duration
+
+        print(
+            f"Ovoz davomiyligi: {duration:.1f} soniya"
+        )
+
+        if duration <= 0 or duration > MAX_SECONDS:
+
+            raise ValueError(
+                "Ovoz 180 soniyadan oshdi. "
+                "Hikoyani qisqartirish kerak."
+            )
+
+        scene_texts = split_into_scenes(
+            story,
+            8
+        )
+
+        scenes = [
+            make_scene(part * 1000, i)
+            for i in range(len(scene_texts))
+        ]
+
+        def frame_function(t):
+
+            return make_frame(
+                t,
+                duration,
+                scenes,
+                scene_texts
+            )
+
+        video = VideoClip(
+            frame_function,
+            duration=duration
+        )
+
+        video = video.set_audio(audio)
+
+        print("Video tayyorlanmoqda...")
+
+        video.write_videofile(
+            OUTPUT,
+            fps=FPS,
+            codec="libx264",
+            audio_codec="aac",
+            preset="ultrafast",
+            threads=2,
+            bitrate="5000k"
+        )
+
+        video.close()
+
+        print("Video yaratildi!")
+
+    finally:
+
         audio.close()
-        raise ValueError(
-            f"Ovoz {duration:.1f} soniya. "
-            f"{MIN_SECONDS}-{MAX_SECONDS} soniya oralig'ida bo'lishi kerak."
-        )
 
-    scene_texts = split_into_scenes(story, 8)
 
-    scenes = [
-        make_scene(part * 1000, i)
-        for i in range(len(scene_texts))
-    ]
+# =====================================
+# YOUTUBE'GA YUKLASH
+# =====================================
 
-    def frame_function(t):
-        return make_frame(
-            t,
-            duration,
-            scenes,
-            scene_texts
-        )
-
-    video = VideoClip(
-        frame_function,
-        duration=duration
-    )
-
-    video = video.set_audio(audio)
-
-    print("Video render qilinmoqda...")
-
-    video.write_videofile(
-        OUTPUT,
-        fps=FPS,
-        codec="libx264",
-        audio_codec="aac",
-        preset="ultrafast",
-        threads=2,
-        bitrate="5000k"
-    )
-
-    video.close()
-    audio.close()
-
-    print("Video tayyor!")
-    # YOUTUBE'GA VIDEO YUKLASH
-def upload_to_youtube(video_file, title, description):
+def upload_to_youtube(
+    video_file,
+    title,
+    description
+):
 
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
@@ -465,8 +574,15 @@ def upload_to_youtube(video_file, title, description):
     client_secret = os.getenv("YOUTUBE_CLIENT_SECRET")
     refresh_token = os.getenv("YOUTUBE_REFRESH_TOKEN")
 
-    if not all([client_id, client_secret, refresh_token]):
-        raise RuntimeError("YouTube API ma'lumotlari topilmadi")
+    if not all([
+        client_id,
+        client_secret,
+        refresh_token
+    ]):
+
+        raise RuntimeError(
+            "YouTube API ma'lumotlari topilmadi"
+        )
 
     credentials = Credentials(
         None,
@@ -474,7 +590,9 @@ def upload_to_youtube(video_file, title, description):
         token_uri="https://oauth2.googleapis.com/token",
         client_id=client_id,
         client_secret=client_secret,
-        scopes=["https://www.googleapis.com/auth/youtube.upload"]
+        scopes=[
+            "https://www.googleapis.com/auth/youtube.upload"
+        ]
     )
 
     credentials.refresh(Request())
@@ -519,18 +637,26 @@ def upload_to_youtube(video_file, title, description):
     response = request.execute()
 
     print(
-        "YouTube'ga yuklandi:",
+        "YouTube video ID:",
         response.get("id")
     )
 
 
+# =====================================
 # ASOSIY DASTUR
+# =====================================
+
 def main():
 
-    part = int(os.getenv("VIDEO_PART", "1"))
+    part = int(
+        os.getenv("VIDEO_PART", "1")
+    )
 
     if part not in (1, 2):
-        raise ValueError("VIDEO_PART faqat 1 yoki 2 bo'lishi kerak")
+
+        raise ValueError(
+            "VIDEO_PART 1 yoki 2 bo'lishi kerak"
+        )
 
     episode_file = Path("episode.json")
 
@@ -551,22 +677,31 @@ def main():
 
     else:
 
-        print("Birinchi qismdagi hikoya yuklanmoqda...")
+        print("Birinchi qismdagi hikoya olinmoqda...")
 
         if not episode_file.exists():
+
             raise FileNotFoundError(
-                "episode.json topilmadi. Avval 1-qism ishlashi kerak."
+                "episode.json topilmadi. "
+                "Avval 1-qism ishlashi kerak."
             )
 
         episode = json.loads(
-            episode_file.read_text(encoding="utf-8")
+            episode_file.read_text(
+                encoding="utf-8"
+            )
         )
 
     story = episode[f"part{part}"]
 
-    print(f"{part}-qism tayyorlanmoqda...")
+    print(
+        f"{part}-qism tayyorlanmoqda..."
+    )
 
-    create_video(story, part)
+    create_video(
+        story,
+        part
+    )
 
     title = (
         f"YO'QOLGANLAR SIRI | {part}-QISM"
@@ -584,7 +719,7 @@ def main():
         description
     )
 
-    print("Barcha ishlar muvaffaqiyatli tugadi!")
+    print("Barcha ishlar tugadi!")
 
 
 if __name__ == "__main__":
