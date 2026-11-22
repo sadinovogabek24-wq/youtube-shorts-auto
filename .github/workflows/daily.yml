@@ -1,72 +1,58 @@
-name: YouTube Shorts Serial
+
+name: AI Mystery Shorts Automation
 
 on:
   workflow_dispatch:
     inputs:
       part:
-        description: "Qism: 1 yoki 2"
+        description: "Video qismi"
         required: true
-        default: "1"
+        type: choice
+        options:
+          - "1"
+          - "2"
+
   schedule:
-    - cron: "0 5 * * *"
     - cron: "0 17 * * *"
+    - cron: "0 5 * * *"
 
 permissions:
   contents: write
 
-concurrency:
-  group: daily-mystery-serial
-  cancel-in-progress: false
-
 jobs:
   build:
     runs-on: ubuntu-latest
-    steps:
-      - name: Repositoryni yuklash
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+    timeout-minutes: 360
 
-      - name: Python o'rnatish
+    env:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+      YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+      YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+      GITHUB_TOKEN: ${{ github.token }}
+
+      SHORTS_PART: ${{ github.event_name == 'workflow_dispatch' && inputs.part || (github.event.schedule == '0 17 * * *' && '1' || '2') }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
-      - name: FFmpeg o'rnatish
+      - name: Install FFmpeg
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
 
-      - name: Kutubxonalarni o'rnatish
-        run: pip install -r requirements.txt
-
-      - name: Qismni aniqlash
-        id: part
-        shell: bash
+      - name: Install requirements
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            PART="${{ inputs.part }}"
-          elif [ "${{ github.event.schedule }}" = "0 5 * * *" ]; then
-            PART="1"
-          else
-            PART="2"
-          fi
-          echo "part=$PART" >> "$GITHUB_OUTPUT"
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Video yaratish va yuklash
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
-          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
-          EPISODE_PART: ${{ steps.part.outputs.part }}
-        run: python main.py
-
-      - name: Hikoyani saqlash
-        if: steps.part.outputs.part == '1'
+      - name: Generate and upload Shorts
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add episode.json
-          git commit -m "Save today's two-part story" || true
-          git push
+          python main.py
