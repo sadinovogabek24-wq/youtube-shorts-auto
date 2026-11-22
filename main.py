@@ -1,299 +1,446 @@
+
 import os
 import re
 import json
 import time
-import random
+import base64
 import asyncio
-import textwrap
 import requests
-
-from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import (
-    VideoFileClip, AudioFileClip, ImageClip,
-    CompositeVideoClip, concatenate_videoclips
-)
 import edge_tts
+
+from datetime import datetime, timedelta, timezone
+from io import BytesIO
+from PIL import Image, ImageDraw, ImageFont
+
 from google import genai
+from moviepy.editor import (
+    VideoFileClip,
+    AudioFileClip,
+    ImageClip,
+    CompositeVideoClip,
+    CompositeAudioClip,
+    concatenate_videoclips,
+    vfx
+)
+
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-# ===================== SOZLAMALAR =====================
-W, H, FPS = 720, 1280, 20
+
+# =====================================
+# SOZLAMALAR
+# =====================================
+
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+
+YOUTUBE_CLIENT_ID = os.environ["YOUTUBE_CLIENT_ID"]
+YOUTUBE_CLIENT_SECRET = os.environ["YOUTUBE_CLIENT_SECRET"]
+YOUTUBE_REFRESH_TOKEN = os.environ["YOUTUBE_REFRESH_TOKEN"]
+
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+GITHUB_REPOSITORY = os.environ.get(
+    "GITHUB_REPOSITORY",
+    "sadinovogabek24-wq/youtube-shorts-auto"
+)
+GITHUB_BRANCH = os.environ.get("GITHUB_REF_NAME", "main")
+
+TEXT_MODEL = "gemini-3.8-flash"
+VIDEO_MODEL = "gemini-omni-1.2-flash"
+
 VOICE = "uz-UZ-SardorNeural"
-VIDEO_PART = int(os.getenv("VIDEO_PART", "1"))
-EPISODE_FILE = "episode.json"
-CACHE_FILE = "pixabay_cache.json"
-AUDIO_FILE = "voice.mp3"
-VIDEO_FILE = "video.mp4"
 
-PIXABAY_KEY = os.environ["PIXABAY_API_KEY"]
-client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+VIDEO_SIZE = (1080, 1920)
+SCENE_COUNT = 4
+SCENE_SECONDS = 10
+
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 
-def log(message):
-    print(message, flush=True)
+# =====================================
+# GITHUB ORQALI HIKOYA SAQLASH
+# =====================================
+
+def github_headers():
+    if not GITHUB_TOKEN:
+        raise RuntimeError(
+            "GITHUB_TOKEN yo'q. daily.yml fayliga token qo'shing."
+        )
+
+    return {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
 
 
-# ===================== GEMINI: ASOSIY + ZAXIRA =====================
-def gemini_text(prompt):
-    models = ["gemini-3.5-flash-lite", "gemini-3.8-flash"]
-    last_error = None
-
-    for model in models:
-        try:
-            log("Gemini modeli: " + model)
-            response = client.models.generate_content(
-                model=model,
-                contents=prompt
-            )
-            result = getattr(response, "text", None)
-
-            if not result:
-                raise ValueError("Gemini bo'sh javob berdi")
-
-            return result
-
-        except Exception as error:
-            last_error = error
-            log(f"{model} ishlamadi: {error}")
-
-    raise RuntimeError("Gemini modellarida xato: " + str(last_error))
-
-
-def extract_json(raw):
-    raw = re.sub(
-        r"^```(?:json)?\s*|\s*```$",
-        "",
-        raw.strip(),
-        flags=re.I
+def github_get_file(path):
+    url = (
+        f"https://api.github.com/repos/"
+        f"{GITHUB_REPOSITORY}/contents/{path}"
     )
-    match = re.search(r"\{.*\}", raw, re.S)
-
-    if not match:
-        raise ValueError("Gemini javobidan JSON topilmadi")
-
-    return json.loads(match.group())
-
-
-# ===================== HIKOYA =====================
-def create_script():
-
-    if VIDEO_PART == 1:
-        prompt = """
-O'zbek tilida juda qiziqarli, sirli va hayajonli, ikki qismli hikoya yoz.
-
-Birinchi qism 140-180 so'z bo'lsin.
-Boshidan tomoshabinni qiziqtirsin.
-Oxirida kuchli sirli joyda to'xtasin.
-
-Ikkinchi qism 140-180 so'z bo'lsin.
-Birinchi qismning bevosita davomi bo'lsin.
-Sirni ochsin va hikoyani yakunlasin.
-
-Har bir qism uchun Pixabay'dan haqiqiy harakatli video topishga
-mos 10-12 ta inglizcha qidiruv iborasi yoz.
-
-Faqat quyidagi tuzilishdagi JSON qaytar:
-
-{
-"title":"Hikoya nomi",
-"part1":"Birinchi qism",
-"part2":"Ikkinchi qism",
-"queries1":["abandoned house","dark forest"],
-"queries2":["old door","man walking at night"]
-}
-"""
-        story = extract_json(gemini_text(prompt))
-
-        for key in (
-            "title", "part1", "part2",
-            "queries1", "queries2"
-        ):
-            if key not in story:
-                raise ValueError(
-                    "Hikoya ma'lumoti yetishmaydi: " + key
-                )
-
-        with open(EPISODE_FILE, "w", encoding="utf-8") as f:
-            json.dump(
-                story,
-                f,
-                ensure_ascii=False,
-                indent=2
-            )
-
-        return (
-            story["title"],
-            story["part1"],
-            story["queries1"]
-        )
-
-    if VIDEO_PART == 2:
-        if not os.path.exists(EPISODE_FILE):
-            raise FileNotFoundError(
-                "episode.json topilmadi. "
-                "Birinchi qismdan saqlangan fayl kerak."
-            )
-
-        with open(EPISODE_FILE, "r", encoding="utf-8") as f:
-            story = json.load(f)
-
-        return (
-            story["title"],
-            story["part2"],
-            story["queries2"]
-        )
-
-    raise ValueError("VIDEO_PART faqat 1 yoki 2 bo'lishi kerak")
-
-
-# ===================== PIXABAY KESH VA QIDIRUV =====================
-def load_cache():
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-
-    return {}
-
-
-def save_cache(cache):
-    with open(CACHE_FILE, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False)
-
-
-def search_pixabay(query, cache):
-    now = time.time()
-    saved = cache.get(query)
-
-    if saved and now - saved.get("time", 0) < 86400:
-        log("Pixabay keshdan olindi: " + query)
-        return saved.get("hits", [])
 
     response = requests.get(
-        "https://pixabay.com/api/videos/",
-        params={
-            "key": PIXABAY_KEY,
-            "q": query,
-            "video_type": "film",
-            "per_page": 10,
-            "safesearch": "true",
-            "order": "popular"
-        },
+        url,
+        headers=github_headers(),
+        params={"ref": GITHUB_BRANCH},
         timeout=30
     )
 
-    response.raise_for_status()
-    hits = response.json().get("hits", [])
+    if response.status_code == 404:
+        return None
 
-    cache[query] = {
-        "time": now,
-        "hits": hits
+    response.raise_for_status()
+
+    data = response.json()
+    return base64.b64decode(data["content"])
+
+
+def github_save_file(path, content, message):
+    url = (
+        f"https://api.github.com/repos/"
+        f"{GITHUB_REPOSITORY}/contents/{path}"
+    )
+
+    headers = github_headers()
+
+    old = requests.get(
+        url,
+        headers=headers,
+        params={"ref": GITHUB_BRANCH},
+        timeout=30
+    )
+
+    payload = {
+        "message": message,
+        "content": base64.b64encode(content).decode("utf-8"),
+        "branch": GITHUB_BRANCH
     }
 
-    save_cache(cache)
-    return hits
+    if old.status_code == 200:
+        payload["sha"] = old.json()["sha"]
+    elif old.status_code != 404:
+        old.raise_for_status()
 
-
-def download_video(url, filename):
-    response = requests.get(
+    response = requests.put(
         url,
-        stream=True,
-        timeout=90
+        headers=headers,
+        json=payload,
+        timeout=60
     )
+
     response.raise_for_status()
+    print("GitHub saqlandi:", path)
+
+
+# =====================================
+# QISMNI ANIQLASH
+# =====================================
+
+def get_part():
+    manual = os.environ.get("SHORTS_PART")
+
+    if manual in ("1", "2"):
+        return int(manual)
+
+    hour = datetime.now(timezone.utc).hour
+
+    # 17:00 UTC = 22:00 Toshkent
+    # 05:00 UTC = 10:00 Toshkent
+
+    if hour >= 12:
+        return 1
+
+    return 2
+
+
+def get_series_date(part):
+    today = datetime.now(timezone.utc).date()
+
+    if part == 1:
+        return today
+
+    return today - timedelta(days=1)
+
+
+# =====================================
+# YANGI HIKOYA YARATISH
+# =====================================
+
+TOPICS = [
+    "Sirli ravishda g'oyib bo'layotgan shahar aholisi",
+    "Okean tubida topilgan noma'lum ulkan inshoot",
+    "Tashlandiq shahardagi sirli yerosti tunneli",
+    "Hech kim kira olmaydigan qadimiy qal'a",
+    "Har kecha bir xil vaqtda paydo bo'ladigan sirli odam",
+    "O'rmonda topilgan noma'lum qadimiy eshik",
+    "Taqiqlangan orolda sodir bo'lgan dahshatli voqealar",
+    "O'yin ichidagi hech kim bilmagan yashirin xona",
+    "Qadimiy afsonadagi maxluqning izlari",
+    "Yo'qolgan ekspeditsiyaning so'nggi siri"
+]
+
+
+def create_story(series_date):
+    index = series_date.toordinal() % len(TOPICS)
+    topic = TOPICS[index]
+
+    prompt = f"""
+Sen professional sirli kino ssenariychisisan.
+
+Mavzu: {topic}
+
+O'zbek auditoriyasi uchun juda qiziqarli,
+sirli, hayajonli va kinodek hikoya yarat.
+
+Hikoya ikkita alohida YouTube Shorts qismidan iborat bo'lsin.
+
+MUHIM TALABLAR:
+
+1. Faqat odam personajlari ishlat.
+2. Bir xil personajlar ikkala qismda ham qatnashsin.
+3. Har bir personajning yoshi, yuzi, sochi,
+   kiyimi va tashqi ko'rinishi aniq belgilansin.
+4. Birinchi qism sirli vaziyat bilan boshlansin.
+5. Birinchi qism oxirida dahshatli cliffhanger bo'lsin.
+6. Ikkinchi qism birinchi qismdagi voqeani davom ettirsin.
+7. Ikkinchi qismda boshqa katta yoshli odam
+   yoki tergovchi sirni sezib, tekshirishni boshlasin.
+8. Yakunda sirning yechimi ochilsin.
+9. Har bir qismda aynan 4 ta sahna bo'lsin.
+10. Har bir sahna taxminan 10 soniyaga mo'ljallansin.
+11. Ovoz matni o'zbek tilida bo'lsin.
+12. Video promptlari ingliz tilida yozilsin.
+13. Har bir sahnada aniq harakat tasvirlansin.
+14. Bitta sahnada bitta asosiy voqea ko'rsatilsin.
+15. Personajlar sahnalar orasida o'zgarmasin.
+
+JSON shaklida javob ber:
+
+{{
+  "title": "Hikoya nomi",
+  "characters": "Barcha personajlarning batafsil tashqi ko'rinishi",
+  "part1": {{
+    "scenes": [
+      {{
+        "narration": "O'zbekcha ovoz matni",
+        "visual": "English cinematic video prompt"
+      }}
+    ]
+  }},
+  "part2": {{
+    "scenes": [
+      {{
+        "narration": "O'zbekcha ovoz matni",
+        "visual": "English cinematic video prompt"
+      }}
+    ]
+  }}
+}}
+
+Har bir qismda 4 ta sahna bo'lsin.
+Har bir narration qisqa, ammo mazmunli bo'lsin.
+"""
+
+
+    response = client.models.generate_content(
+        model=TEXT_MODEL,
+        contents=prompt,
+        config={
+            "response_mime_type": "application/json"
+        }
+    )
+
+    story = json.loads(response.text)
+
+    for part in ("part1", "part2"):
+        scenes = story[part]["scenes"]
+
+        if len(scenes) != SCENE_COUNT:
+            raise RuntimeError(
+                f"{part}: 4 ta sahna yaratilmagan."
+            )
+
+    story["topic"] = topic
+    story["series_date"] = str(series_date)
+
+    return story
+
+
+# =====================================
+# HIKOYA HOLATINI SAQLASH
+# =====================================
+
+def load_or_create_story(part, series_date):
+
+    if part == 1:
+        story = create_story(series_date)
+
+        github_save_file(
+            "series_state.json",
+            json.dumps(
+                story,
+                ensure_ascii=False,
+                indent=2
+            ).encode("utf-8"),
+            "Yangi ikki qismli hikoya"
+        )
+
+        print("Yangi hikoya:", story["title"])
+        return story
+
+    data = github_get_file("series_state.json")
+
+    if not data:
+        raise RuntimeError(
+            "1-qism hikoyasi topilmadi. "
+            "Avval 1-qismni yaratish kerak."
+        )
+
+    story = json.loads(data)
+
+    if story["series_date"] != str(series_date):
+        raise RuntimeError(
+            "Ikkinchi qism uchun sana mos kelmadi."
+        )
+
+    print("Davom ettirilayotgan hikoya:", story["title"])
+
+    return story
+
+
+# =====================================
+# AI VIDEO YARATISH
+# =====================================
+
+def generate_ai_video(prompt, filename, reference=None):
+
+    character_description = """
+    Maintain exactly the same main human character:
+    same face, same hairstyle, same clothing,
+    same age and same body proportions.
+    Cinematic realistic film quality.
+    Natural human movement, realistic physics,
+    detailed environment, dramatic lighting.
+    Vertical 9:16 video.
+    No random unrelated shots.
+    No scene montage.
+    No subtitles or text overlays.
+    """
+
+    full_prompt = (
+        character_description
+        + "\nScene action:\n"
+        + prompt
+    )
+
+    inputs = []
+
+    if reference and os.path.exists(reference):
+        with open(reference, "rb") as f:
+            image_data = base64.b64encode(
+                f.read()
+            ).decode("utf-8")
+
+        inputs.append({
+            "type": "image",
+            "data": image_data,
+            "mime_type": "image/png"
+        })
+
+    inputs.append({
+        "type": "text",
+        "text": full_prompt
+    })
+
+    print("AI video yaratilmoqda:", filename)
+
+    interaction = client.interactions.create(
+        model=VIDEO_MODEL,
+        input=inputs,
+        response_format={
+            "type": "video",
+            "aspect_ratio": "9:16",
+            "duration": f"{SCENE_SECONDS}s"
+        }
+    )
+
+    if not interaction.output_video:
+        raise RuntimeError("AI video javobi bo'sh.")
+
+    if not interaction.output_video.data:
+        raise RuntimeError("Video ma'lumoti olinmadi.")
+
+    video_data = base64.b64decode(
+        interaction.output_video.data
+    )
 
     with open(filename, "wb") as f:
-        for chunk in response.iter_content(1024 * 256):
-            if chunk:
-                f.write(chunk)
+        f.write(video_data)
 
     if os.path.getsize(filename) < 10000:
-        raise ValueError("Yuklangan video juda kichik")
+        raise RuntimeError("Video fayli juda kichik.")
+
+    print("Video tayyor:", filename)
 
     return filename
 
 
-def get_real_videos(queries):
-    cache = load_cache()
-    selected = []
-    used_ids = set()
-    sources = []
+# =====================================
+# PERSONAJ RASMINI SAQLASH
+# =====================================
 
-    for query in queries[:12]:
-        if len(selected) >= 12:
-            break
+def create_character_reference(video_path):
 
-        try:
-            hits = search_pixabay(query, cache)
-            random.shuffle(hits)
+    clip = VideoFileClip(video_path)
 
-            for hit in hits:
-                if hit.get("id") in used_ids:
-                    continue
+    frame = clip.get_frame(
+        min(1.0, clip.duration - 0.1)
+    )
 
-                videos = hit.get("videos", {})
-                data = (
-                    videos.get("medium")
-                    or videos.get("small")
-                    or videos.get("tiny")
-                )
+    image = Image.fromarray(frame).convert("RGB")
+    image.save("character_reference.png")
 
-                if not data or not data.get("url"):
-                    continue
+    clip.close()
 
-                filename = f"stock_{len(selected)}.mp4"
+    github_save_file(
+        "character_reference.png",
+        open("character_reference.png", "rb").read(),
+        "Hikoya bosh qahramoni reference rasmi"
+    )
 
-                try:
-                    download_video(data["url"], filename)
-                except Exception as error:
-                    log("Video yuklash xatosi: " + str(error))
-                    continue
+    print("Personaj rasmi saqlandi.")
 
-                used_ids.add(hit["id"])
-                selected.append(filename)
 
-                if hit.get("pageURL"):
-                    sources.append(hit["pageURL"])
+# =====================================
+# O'ZBEKCHA ERKAK OVOZI
+# =====================================
 
-                break
+def create_voice(text, filename):
 
-        except Exception as error:
-            log(
-                f"Pixabay qidiruvi o'tkazib yuborildi "
-                f"({query}): {error}"
-            )
-
-    save_cache(cache)
-
-    if not selected:
-        raise RuntimeError(
-            "Pixabay'dan video topilmadi. API kalitini tekshiring."
+    async def generate():
+        communicate = edge_tts.Communicate(
+            text=text,
+            voice=VOICE,
+            rate="-5%",
+            pitch="-2Hz"
         )
 
-    log(f"Topilgan videolar: {len(selected)}")
-    return selected, sources
+        await communicate.save(filename)
+
+    asyncio.run(generate())
+
+    print("Ovoz tayyor:", filename)
 
 
-# ===================== O'ZBEKCHA ERKAK OVOZI =====================
-async def make_voice(text):
-    communicate = edge_tts.Communicate(
-        text=text,
-        voice=VOICE,
-        rate="-5%",
-        volume="+0%"
-    )
-    await communicate.save(AUDIO_FILE)
+# =====================================
+# SUBTITR RASMI
+# =====================================
 
-
-# ===================== MATNLI RASMLAR =====================
 def get_font(size):
     paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf"
     ]
 
     for path in paths:
@@ -303,242 +450,355 @@ def get_font(size):
     return ImageFont.load_default()
 
 
-def make_banner(text, filename, height=180):
-    img = Image.new(
+def make_subtitle(text, filename):
+
+    image = Image.new(
         "RGBA",
-        (W, height),
+        VIDEO_SIZE,
         (0, 0, 0, 0)
     )
 
-    draw = ImageDraw.Draw(img)
+    draw = ImageDraw.Draw(image)
+    font = get_font(43)
 
-    draw.rounded_rectangle(
-        (15, 10, W - 15, height - 10),
-        radius=25,
-        fill=(0, 0, 0, 210)
-    )
+    words = text.split()
+    lines = []
+    current = ""
 
-    font = get_font(38)
-    lines = textwrap.wrap(text, width=27)[:3]
+    for word in words:
+        test = (current + " " + word).strip()
 
-    line_heights = []
+        if draw.textbbox((0, 0), test, font=font)[2] > 930:
+            lines.append(current)
+            current = word
+        else:
+            current = test
+
+    if current:
+        lines.append(current)
+
+    lines = lines[:3]
+
+    y = 0
 
     for line in lines:
         box = draw.textbbox((0, 0), line, font=font)
-        line_heights.append((line, box[2] - box[0]))
+        width = box[2] - box[0]
 
-    y = max(15, (height - len(lines) * 48) // 2)
+        x = (1080 - width) // 2
 
-    for line, width in line_heights:
         draw.text(
-            ((W - width) / 2, y),
+            (x + 2, 1460 + y + 3),
             line,
             font=font,
-            fill="white"
+            fill=(0, 0, 0, 255)
         )
-        y += 48
 
-    img.save(filename)
-    return filename
+        draw.text(
+            (x, 1460 + y),
+            line,
+            font=font,
+            fill=(255, 255, 255, 255),
+            stroke_width=2,
+            stroke_fill=(0, 0, 0, 255)
+        )
+
+        y += 58
+
+    image.save(filename)
 
 
-def make_subtitle(text, filename):
-    img = Image.new(
+# =====================================
+# OXIRGI EKRAN
+# =====================================
+
+def make_outro(part, filename):
+
+    image = Image.new(
         "RGBA",
-        (W, 220),
+        VIDEO_SIZE,
         (0, 0, 0, 0)
     )
 
-    draw = ImageDraw.Draw(img)
+    draw = ImageDraw.Draw(image)
 
     draw.rounded_rectangle(
-        (12, 5, W - 12, 210),
-        radius=20,
-        fill=(0, 0, 0, 205)
+        (65, 1390, 1015, 1810),
+        radius=45,
+        fill=(0, 0, 0, 225)
     )
 
-    font = get_font(31)
-    y = 20
+    title_font = get_font(65)
+    button_font = get_font(35)
 
-    for line in textwrap.wrap(text, width=34)[:4]:
+    if part == 1:
+
+        text = "DAVOMI 2-QISMDA"
+
+        box = draw.textbbox(
+            (0, 0), text, font=title_font
+        )
+
+        x = (1080 - (box[2] - box[0])) // 2
+
         draw.text(
-            (28, y),
-            line,
-            font=font,
+            (x, 1530),
+            text,
+            font=title_font,
+            fill=(255, 220, 70, 255)
+        )
+
+        small = "Keyingi qismni o'tkazib yubormang!"
+
+        box = draw.textbbox(
+            (0, 0), small, font=button_font
+        )
+
+        x = (1080 - (box[2] - box[0])) // 2
+
+        draw.text(
+            (x, 1650),
+            small,
+            font=button_font,
             fill="white"
         )
-        y += 43
 
-    img.save(filename)
-    return filename
+    else:
 
-
-# ===================== VERTIKAL VIDEO MONTAJ =====================
-def create_video(script, title, video_paths):
-    audio = AudioFileClip(AUDIO_FILE)
-    duration = audio.duration
-
-    if duration <= 0:
-        audio.close()
-        raise ValueError("Ovoz davomiyligi noto'g'ri")
-
-    sources = []
-    segments = []
-    overlays = []
-
-    base = None
-    final = None
-
-    try:
-        scene_length = 4
-        current_time = 0
-        index = 0
-
-        while current_time < duration:
-            path = video_paths[index % len(video_paths)]
-            source = VideoFileClip(path, audio=False)
-            sources.append(source)
-
-            if source.duration > scene_length + 1:
-                start = random.uniform(
-                    0,
-                    source.duration - scene_length
-                )
-            else:
-                start = 0
-
-            end = min(
-                start + scene_length,
-                source.duration
-            )
-
-            part = source.subclip(start, end)
-
-            if part.w / part.h < W / H:
-                part = part.resize(width=W)
-            else:
-                part = part.resize(height=H)
-
-            part = part.crop(
-                x_center=part.w / 2,
-                y_center=part.h / 2,
-                width=W,
-                height=H
-            )
-
-            remaining = duration - current_time
-
-            if part.duration > remaining:
-                part = part.subclip(0, remaining)
-
-            segments.append(part)
-            current_time += part.duration
-            index += 1
-
-        base = concatenate_videoclips(
-            segments,
-            method="chain"
-        ).set_duration(duration)
-
-        base = base.set_audio(audio)
-
-        # Sarlavha
-        title_file = make_banner(title, "title.png")
-
-        overlays.append(
-            ImageClip(title_file)
-            .set_start(0)
-            .set_duration(min(5, duration))
-            .set_position(("center", 70))
-        )
-
-        # Subtitrlar
-        words = script.split()
-        chunks = [
-            words[i:i + 8]
-            for i in range(0, len(words), 8)
+        buttons = [
+            (90, 1510, 365, 1690, "LIKE"),
+            (400, 1510, 680, 1690, "IZOH"),
+            (715, 1510, 990, 1690, "OBUNA")
         ]
 
-        caption_duration = duration / max(1, len(chunks))
+        for x1, y1, x2, y2, label in buttons:
 
-        for i, chunk in enumerate(chunks):
-            filename = f"subtitle_{i}.png"
-
-            make_subtitle(
-                " ".join(chunk),
-                filename
+            color = (
+                (215, 25, 32, 255)
+                if label == "OBUNA"
+                else (55, 55, 55, 255)
             )
 
-            overlays.append(
-                ImageClip(filename)
-                .set_start(i * caption_duration)
-                .set_duration(caption_duration)
-                .set_position(("center", 980))
+            draw.rounded_rectangle(
+                (x1, y1, x2, y2),
+                radius=30,
+                fill=color
             )
 
-        # Yakuniy yozuv
-        if VIDEO_PART == 1:
-            end_text = "DAVOMI KEYINGI QISMDA..."
-        else:
-            end_text = "HIKOYA YAKUNLANDI!"
+            box = draw.textbbox(
+                (0, 0), label, font=button_font
+            )
 
-        end_file = make_banner(
-            end_text,
-            "ending.png",
-            height=200
+            tw = box[2] - box[0]
+            th = box[3] - box[1]
+
+            draw.text(
+                (
+                    x1 + (x2 - x1 - tw) // 2,
+                    y1 + (y2 - y1 - th) // 2
+                ),
+                label,
+                font=button_font,
+                fill="white"
+            )
+
+        footer = "LAYK BOSING  •  FIKR YOZING  •  OBUNA BO'LING"
+
+        draw.text(
+            (100, 1740),
+            footer,
+            font=get_font(23),
+            fill="white"
         )
 
-        overlays.append(
-            ImageClip(end_file)
-            .set_start(max(0, duration - min(4, duration)))
-            .set_duration(min(4, duration))
-            .set_position(("center", 520))
+    image.save(filename)
+
+
+# =====================================
+# VIDEO SAHNALARINI BIRLASHTIRISH
+# =====================================
+
+def create_video(story, part, reference):
+
+    section = story[f"part{part}"]
+
+    clips = []
+
+    for i, scene in enumerate(section["scenes"]):
+
+        video_file = f"scene_{i+1}.mp4"
+        voice_file = f"voice_{i+1}.mp3"
+        subtitle_file = f"subtitle_{i+1}.png"
+
+        visual = (
+            story["characters"]
+            + "\n"
+            + scene["visual"]
         )
 
-        final = CompositeVideoClip(
-            [base] + overlays,
-            size=(W, H)
-        ).set_audio(audio)
-
-        log("Video MP4 formatida saqlanmoqda...")
-
-        final.write_videofile(
-            VIDEO_FILE,
-            fps=FPS,
-            codec="libx264",
-            audio_codec="aac",
-            preset="ultrafast",
-            threads=4,
-            bitrate="1800k",
-            logger="bar"
+        generate_ai_video(
+            visual,
+            video_file,
+            reference
         )
 
-        log("Video tayyor!")
+        if part == 1 and i == 0:
+            create_character_reference(video_file)
+            reference = "character_reference.png"
 
-    finally:
-        if final:
-            final.close()
+        create_voice(
+            scene["narration"],
+            voice_file
+        )
 
-        if base:
-            base.close()
+        make_subtitle(
+            scene["narration"],
+            subtitle_file
+        )
 
-        for source in sources:
-            try:
-                source.close()
-            except Exception:
-                pass
+        video = VideoFileClip(video_file).resize(
+            newsize=VIDEO_SIZE
+        )
 
-        audio.close()
+        voice = AudioFileClip(voice_file)
+
+        duration = max(video.duration, voice.duration)
+
+        if voice.duration > video.duration:
+
+            extra = voice.duration - video.duration
+
+            video = video.fx(
+                vfx.freeze,
+                t=max(0, video.duration - 0.1),
+                freeze_duration=extra
+            )
+
+        video = video.set_duration(duration)
+
+        audio_layers = [voice.volumex(1.0)]
+
+        if video.audio:
+            audio_layers.append(
+                video.audio.volumex(0.10)
+            )
+
+        combined_audio = CompositeAudioClip(
+            audio_layers
+        ).set_duration(duration)
+
+        video = video.set_audio(combined_audio)
+
+        subtitle = (
+            ImageClip(
+                subtitle_file,
+                transparent=True
+            )
+            .set_duration(duration)
+            .set_position(("center", "center"))
+        )
+
+        final_scene = CompositeVideoClip(
+            [video, subtitle],
+            size=VIDEO_SIZE
+        )
+
+        clips.append(final_scene)
+
+        print(
+            f"{i+1}/{SCENE_COUNT} sahna tayyor."
+        )
+
+    final = concatenate_videoclips(
+        clips,
+        method="compose"
+    )
+
+    # =================================
+    # YAKUNIY OVOZ VA CTA
+    # =================================
+
+    if part == 1:
+        ending_text = (
+            "Bu sir hali tugamadi. "
+            "Davomi ikkinchi qismda."
+        )
+    else:
+        ending_text = (
+            "Agar hikoya sizga yoqqan bo'lsa, "
+            "layk bosing, izoh yozing va "
+            "kanalga obuna bo'ling. "
+            "Yangi sirli hikoyalarda ko'rishamiz!"
+        )
+
+    create_voice(
+        ending_text,
+        "ending.mp3"
+    )
+
+    make_outro(
+        part,
+        "outro.png"
+    )
+
+    ending_voice = AudioFileClip("ending.mp3")
+
+    outro_duration = max(
+        5,
+        ending_voice.duration
+    )
+
+    last_frame = ImageClip(
+        final.get_frame(final.duration - 0.05)
+    ).set_duration(outro_duration)
+
+    outro_image = (
+        ImageClip("outro.png", transparent=True)
+        .set_duration(outro_duration)
+    )
+
+    outro_video = CompositeVideoClip(
+        [last_frame, outro_image],
+        size=VIDEO_SIZE
+    ).set_audio(ending_voice)
+
+    final = concatenate_videoclips(
+        [final, outro_video],
+        method="compose"
+    )
+
+    final.write_videofile(
+        "shorts.mp4",
+        fps=24,
+        codec="libx264",
+        audio_codec="aac",
+        preset="ultrafast",
+        threads=2,
+        bitrate="5000k"
+    )
+
+    for clip in clips:
+        clip.close()
+
+    final.close()
+
+    print("YAKUNIY VIDEO TAYYOR!")
+
+    return "shorts.mp4"
 
 
-# ===================== YOUTUBE'GA YUKLASH =====================
-def upload_to_youtube(title, sources):
+# =====================================
+# YOUTUBE'GA YUKLASH
+# =====================================
+
+def upload_youtube(filename, story, part):
+
     credentials = Credentials(
-        None,
-        refresh_token=os.environ["YOUTUBE_REFRESH_TOKEN"],
+        token=None,
+        refresh_token=YOUTUBE_REFRESH_TOKEN,
         token_uri="https://oauth2.googleapis.com/token",
-        client_id=os.environ["YOUTUBE_CLIENT_ID"],
-        client_secret=os.environ["YOUTUBE_CLIENT_SECRET"],
+        client_id=YOUTUBE_CLIENT_ID,
+        client_secret=YOUTUBE_CLIENT_SECRET,
         scopes=[
             "https://www.googleapis.com/auth/youtube.upload"
         ]
@@ -547,43 +807,53 @@ def upload_to_youtube(title, sources):
     youtube = build(
         "youtube",
         "v3",
-        credentials=credentials,
-        cache_discovery=False
+        credentials=credentials
     )
 
-    description = (
-        "O'zbek tilidagi sirli hikoya.\n"
-        "Hikoya davom etadi!\n"
-        "#shorts #uzbek #sirli #hikoya\n\n"
-        "Video lavhalari: Pixabay\n"
-        + "\n".join(sources)
+    title = (
+        story["title"]
+        + f" | {part}-QISM #shorts"
+    )
+
+    description = f"""
+{story['title']}
+
+Bu sirli hikoyaning {part}-qismi.
+
+{"Davomi ikkinchi qismda!" if part == 1 else "Yangi sirli hikoyalar uchun obuna bo'ling!"}
+
+#shorts #sirlar #dahshat #afsona #uzbek
+"""
+
+    body = {
+        "snippet": {
+            "title": title[:100],
+            "description": description,
+            "categoryId": "24",
+            "tags": [
+                "shorts",
+                "sirli hikoyalar",
+                "dahshat",
+                "afsonalar",
+                "uzbek"
+            ]
+        },
+        "status": {
+            "privacyStatus": "public",
+            "selfDeclaredMadeForKids": False
+        }
+    }
+
+    media = MediaFileUpload(
+        filename,
+        mimetype="video/mp4",
+        resumable=True
     )
 
     request = youtube.videos().insert(
         part="snippet,status",
-        body={
-            "snippet": {
-                "title": f"{title} | {VIDEO_PART}-qism #shorts",
-                "description": description[:4900],
-                "tags": [
-                    "uzbek",
-                    "sirli hikoya",
-                    "shorts",
-                    "uzbekcha"
-                ],
-                "categoryId": "22"
-            },
-            "status": {
-                "privacyStatus": "public",
-                "selfDeclaredMadeForKids": False
-            }
-        },
-        media_body=MediaFileUpload(
-            VIDEO_FILE,
-            mimetype="video/mp4",
-            resumable=True,
-            chunksize=8 * 1024 * 1024
-        )
+        body=body,
+        media_body=media
     )
 
     response = None
@@ -592,43 +862,72 @@ def upload_to_youtube(title, sources):
         status, response = request.next_chunk()
 
         if status:
-            log(
-                "YouTube yuklash: "
-                + str(int(status.progress() * 100))
-                + "%"
+            print(
+                f"Yuklanmoqda: {int(status.progress() * 100)}%"
             )
 
-    log("YouTube video ID: " + response["id"])
+    print(
+        "YOUTUBE VIDEO JOYLANDI:",
+        response["id"]
+    )
 
 
-# ===================== ASOSIY DASTUR =====================
+# =====================================
+# ASOSIY DASTUR
+# =====================================
+
 def main():
-    log("YOUTUBE SHORTS AVTOMATIK TIZIM")
-    log(f"Video qismi: {VIDEO_PART}")
 
-    log("1. Hikoya olinmoqda...")
-    title, story, queries = create_script()
+    part = get_part()
+    series_date = get_series_date(part)
 
-    if VIDEO_PART == 1:
-        ending = "Davomi keyingi qismda..."
-    else:
-        ending = "Hikoya yakunlandi!"
+    print("=" * 50)
+    print("AI SIRLI SHORTS")
+    print("QISM:", part)
+    print("SANA:", series_date)
+    print("=" * 50)
 
-    full_text = story.rstrip() + " " + ending
+    story = load_or_create_story(
+        part,
+        series_date
+    )
 
-    log("2. Sardor erkak ovozida audio yaratilmoqda...")
-    asyncio.run(make_voice(full_text))
+    reference = None
 
-    log("3. Pixabay videolari qidirilmoqda...")
-    video_paths, sources = get_real_videos(queries)
+    if part == 2:
 
-    log("4. Video montaj qilinmoqda...")
-    create_video(full_text, title, video_paths)
+        reference_data = github_get_file(
+            "character_reference.png"
+        )
 
-    log("5. YouTube'ga yuklanmoqda...")
-    upload_to_youtube(title, sources)
+        if not reference_data:
+            raise RuntimeError(
+                "Bosh qahramon rasmi topilmadi."
+            )
 
-    log("HAMMA JARAYON TUGADI!")
+        with open(
+            "character_reference.png",
+            "wb"
+        ) as f:
+            f.write(reference_data)
+
+        reference = "character_reference.png"
+
+    video = create_video(
+        story,
+        part,
+        reference
+    )
+
+    upload_youtube(
+        video,
+        story,
+        part
+    )
+
+    print("=" * 50)
+    print("BARCHA ISHLAR MUVAFFAQIYATLI TUGADI")
+    print("=" * 50)
 
 
 if __name__ == "__main__":
