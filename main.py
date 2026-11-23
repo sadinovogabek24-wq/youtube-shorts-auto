@@ -35,6 +35,7 @@ def main():
         print(f"TAYYOR: {part_number}-qism yuklandi.")
 
     print("IKKALA QISM HAM TAYYOR!")
-    
+
+
 if __name__ == "__main__":
     main()
